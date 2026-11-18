@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.reference-relevant/
+*.bak.*
+.env
+.DS_Store
+Thumbs.db
