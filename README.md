@@ -1,5 +1,7 @@
 # reference-relevance
 
+![reference-relevance — 引用相关性决策助手](assets/banner.png)
+
 面向学术论文的引用相关性决策助手。先理解引用处的正文需求，再判断已引文献是否匹配；对低相关引用给出证据、建议动作与替换候选，默认只生成 diff，须人工确认后才写回原稿。
 
 当前适用学科为经管实证与建模论文，支持 Word `.docx`、PDF、LaTeX，以及中文 GB/T 7714 与 APA 作者—年份制。
