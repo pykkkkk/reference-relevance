@@ -60,7 +60,7 @@ def main():
                 qv = model.encode([query], normalize_embeddings=True)
                 dv = model.encode(docs, normalize_embeddings=True)
                 sims = cos_sim(qv, dv)[0]
-                recall = "specter2"
+                recall = "specter"
             except Exception as exc:
                 print(f"[semantic] encode failed: {exc}; fallback BM25", file=sys.stderr)
                 sims = bm25_scores(query, docs)

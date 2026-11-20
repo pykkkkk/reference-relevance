@@ -1,15 +1,17 @@
 ---
 name: reference-relevant
-version: 0.1.1
+version: 0.2.0
 agent_created: true
-description: 评估学术论文中已有引用是否与正文的引用需求匹配，发现无关/错配引用并检索更合适的替换文献。当用户要求检查引用相关性、排查无关引用、判断文献是否支撑正文论断、为论断寻找或替换参考文献、审计引文归因时使用。面向经管实证与建模论文，支持 Word .docx / PDF / LaTeX，中文 GB/T 7714 与 APA 作者—年份制。本 skill 不以文献验真或格式规范为主，也不做全面漏引检测。
+description: 评估学术论文中已有引用是否与正文的引用需求匹配，发现无关/错配引用并检索更合适的替换文献。执行前先做文献来源正确性检查，发现疑似编造或元数据错误时先修正。当用户要求检查引用相关性、排查无关引用、判断文献是否支撑正文论断、为论断寻找或替换参考文献、审计引文归因、核验参考文献真实性时使用。适用学科为经管实证与建模论文，支持 Word .docx / PDF / LaTeX，中文 GB/T 7714 与 APA 作者—年份制。本 skill 不以格式规范检查为主，也不做全面漏引检测。
 ---
 
 # Reference Relevant — 引用相关性决策助手
 
 ## Overview
 
-按「需求先行、供给匹配」评估现有引用：先读懂引用处正文想表达什么，推导该处的引用需求；再判断已引文献是否满足该需求。只有判定不满足时，才用同一把尺子检索并排序替换候选。
+按「需求先行、供给匹配」评估现有引用：先确保引用条目本身真实且著录正确，再读懂引用处正文想表达什么，推导该处的引用需求；然后判断已引文献是否满足该需求。只有判定不满足时，才用同一把尺子检索并排序替换候选。
+
+**前置闸门**：文献来源正确性检查不通过时，先修正条目，不做相关性评估。这是为了防止在错误文献对象上计算「匹配度」。
 
 本 skill 输出**证据与建议**，不代替作者做最终决定；替换默认只生成 diff，须显式确认才写回。
 
@@ -17,9 +19,10 @@ description: 评估学术论文中已有引用是否与正文的引用需求匹�
 
 - **主攻**：已有引用。无引用区域默认跳过；仅对重要概念、核心论断做「建议补引」提醒，不做全面漏引检查。
 - **适用学科**：经管实证与建模论文。保留 `discipline` 参数，取值 `econ-empirical` / `econ-modeling`；两者使用不同需求模板。
-- **不做**：文献存在性核验与格式规范为主（路由到 citation-verify / citation-validator 等）；绕过验证码或反爬获取中文文献。
+- **前置**：每条引用都必须先通过来源正确性检查；存在性或作者 / 题名 / 期刊 / 年份 / 页码等字段有误时，先修正。详见 `references/source-verification.md`。
+- **不做**：全面格式规范检查；绕过验证码或反爬获取中文文献。
 - **中文能力边界**：CNKI 无公开 API；CNKI AI LINK 未覆盖经管；OpenAlex / Crossref 对中文经管核心期刊覆盖极差。查不到时输出「无法核验」，**不得**输出「文献不存在」。详见 `references/cn-sources.md`。
-- **当前限制**：语义召回、NLI 支撑性判定、置信度校准为可选算法层；依赖缺失时由 agent 按量规推理并显式标注。分数为决策辅助，不作绝对结论。
+- **v0.1.0 限制**：语义召回、NLI 支撑性判定、置信度校准均由 agent 按量规推理完成，尚未接入专用模型；分数为决策辅助，不作绝对结论。
 
 ## Workflow
 
@@ -34,6 +37,24 @@ python scripts/parse_document.py <input> -o .reference-relevant/parsed.json [--d
 接受 `.docx`、`.pdf`、`.tex` 或含 `.tex` + `.bib` 的目录。输出 JSON：文献条目、引用位置、引用上下文、正文段落、章节信息。支持编号制 `[1]`、`[1,2]` 与作者—年份制 `(Smith, 2020)`、`Smith (2020)`。
 
 检查输出中的 `parse_warnings`：出现「引用标记无法解析」「参考文献切分失败」时，先人工核对原稿，不继续评分。
+
+### Step 0A — 来源正确性前置检查（硬性闸门）
+
+```bash
+python scripts/verify_sources.py .reference-relevant/parsed.json -o .reference-relevant/source_check.json
+```
+
+检查文献是否存在，以及作者、题名、期刊/来源、年份、DOI、卷期页码是否与可信库记录一致。输出 `source_check.json`，其中 `blocking=true` 表示存在必须先处理的问题。
+
+处理规则：
+- `needs_fix`：来源存在但字段有误或缺失。执行：
+  ```bash
+  python scripts/apply_source_fixes.py .reference-relevant/source_check.json --input <input> -o .reference-relevant/source_fixes.diff
+  ```
+  检查 diff，用户确认后才加 `--apply` 写回；重新解析并重新核验。
+- `fabricated_suspected`：多源无命中，疑似编造。**不得自动改写**，须人工确认来源或删除该条引用。
+- `unverifiable_zh` / `unverifiable_degraded`：无法核验，不等于不存在；向用户说明限制并取得确认后才能继续。
+- 只要仍有 `blocking=true`，不得进入 Step 1 及后续评分。
 
 ### Step 1 — 需求画像（agent 推理）
 
@@ -125,6 +146,7 @@ agent 不重复执行脚本可完成的取数工作；脚本不做语义判断�
 
 ### references/
 - `rubric.md` — 相关性评分量规 v0.2（三组维度、四级判定、一票否决、证据句、置信度）
+- `source-verification.md` — 来源正确性前置检查的字段、状态与处理顺序
 - `algorithms.md` — 四个算法脚本（评分、NLI、语义召回、校准）的接口、依赖与降级状态
 - `citation_functions.md` — 经管引用功能轴；实证与建模两个需求模板
 - `api-notes.md` — 英文数据源、限额、缓存、验真策略
@@ -133,13 +155,17 @@ agent 不重复执行脚本可完成的取数工作；脚本不做语义判断�
 ### assets/
 - `report-template.md` — 报告输出模板
 
-### 脚本清单
+### scripts/
 - `parse_document.py` — 文档解析与论断单元抽取
+- `verify_sources.py` — 来源正确性与著录字段前置检查
+- `apply_source_fixes.py` — 按核验结果生成字段修正 diff，确认后写回
 - `fetch_metadata.py` — 元数据获取、验真、缓存
 - `search_candidates.py` — 检索与初排
-- `score_relevance.py` — rubric v0.2 确定性评分
-- `nli_verify.py` — 主张—证据 NLI 三态判定
-- `semantic_recall.py` — SPECTER2 语义重排（可选）
-- `calibrate.py` — 置信度校准
 - `apply_replacement.py` — diff 生成、备份、确认后写回
 - `rr_common.py` — 共享工具（规范化、缓存、HTTP、BM25 辅助）
+
+## 版本记录
+
+- v0.2.0：新增来源正确性前置检查与字段修正闭环；核验不通过时不得进入相关性评估。
+- v0.1.1：题目+摘要降级模式；`title_only` 强制弃权，降级不得判 D。
+- v0.1.0：解析、取数、检索、diff 脚本链与可选算法层。

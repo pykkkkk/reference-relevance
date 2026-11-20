@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NLI-based claim/support verification with atomic claim splitting."""
+"""NLI-based claim/support verification with atomic claim splitting (v0.1.0 algorithm layer)."""
 import argparse
 import re
 import sys
@@ -12,7 +12,7 @@ DEFAULT_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
 
 
 def atomic_claims(text):
-    """Split a claim into independently verifiable atoms (rule-based)."""
+    """Split a claim into independently verifiable atoms (rule-based v0.1.0)."""
     text = (text or "").strip()
     parts = re.split(r"(?<=[。；;.!?])\s*|\s+and\s+|\s+并且\s+|\s+而且\s+", text)
     atoms = [p.strip(" ,，。．;；") for p in parts if len(p.strip()) > 8]
@@ -63,6 +63,15 @@ def load_classifier(model_name):
         return None, f"模型加载失败: {exc}"
 
 
+def normalize_output(raw):
+    """Support both transformers 4.x (list[list[dict]]) and 5.x (list[dict])."""
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list) and raw and isinstance(raw[0], list):
+        return raw[0]
+    return raw if isinstance(raw, list) else []
+
+
 def map_label(label):
     l = label.lower()
     if "entail" in l or "support" in l:
@@ -96,8 +105,9 @@ def main():
     else:
         for p in pairs:
             try:
-                out = clf({"text": p.get("evidence", ""), "text_pair": p.get("claim", "")})[0]
-                probs = {map_label(x["label"]): float(x["score"]) for x in out}
+                raw = clf({"text": p.get("evidence", ""), "text_pair": p.get("claim", "")})
+                out = normalize_output(raw)
+                probs = {map_label(x["label"]): float(x["score"]) for x in out if isinstance(x, dict)}
                 direction = max(probs, key=probs.get)
                 results.append({**p, "direction": direction, "score": round(probs.get(direction, 0), 4),
                                 "probs": {k: round(v, 4) for k, v in probs.items()}, "status": "ok",

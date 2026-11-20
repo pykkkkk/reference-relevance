@@ -1,6 +1,6 @@
 # reference-relevance
 
-A citation-relevance decision assistant for academic writing. It first identifies what a citation is needed for in the surrounding text, then checks whether the cited work actually supplies it. Low-relevance citations receive evidence, recommended actions, and replacement candidates. Replacements are delivered as a diff by default and are written back only after explicit human confirmation.
+A citation-relevance decision assistant for academic writing. It first verifies that each cited work exists and that its bibliographic details are correct. It then identifies what a citation is needed for in the surrounding text and checks whether the cited work actually supplies it. Low-relevance citations receive evidence, recommended actions, and replacement candidates. Replacements are delivered as a diff by default and are written back only after explicit human confirmation.
 
 The current discipline profile covers empirical and modeling papers in economics and management. Inputs include Word `.docx`, PDF, and LaTeX, with GB/T 7714 and APA author-year citation styles.
 
@@ -8,6 +8,7 @@ The current discipline profile covers empirical and modeling papers in economics
 
 ## Features
 
+- Pre-flight source verification: check existence and compare authors, title, venue, year, DOI, volume, issue, and pages against trusted databases; correct errors before evaluating relevance.
 - Parse documents into claim units, citation positions, citation contexts, and reference entries.
 - Use a need–supply framework to classify citation functions and assess each cited work individually, including every item inside a multi-citation parenthesis.
 - Retrieve real abstracts from multiple sources and cross-check metadata; Chinese sources are routed separately, and unverifiable items are reported as "unverifiable" rather than "nonexistent".
@@ -18,13 +19,38 @@ The current discipline profile covers empirical and modeling papers in economics
 
 The criterion can be summarized in one sentence: **identify what the text needs, describe what the source supplies, and check whether they align**. Lexical or abstract similarity is only one signal, not the final decision.
 
-1. **Read the citation context first.** Different claims in the same sentence may need different kinds of support: a theoretical basis, a method source, a data source, or a comparison with prior results. Each need is recorded on a functional axis and a strength axis: the functional axis asks why a citation is needed; the strength axis asks whether direct evidence or only background context is required. Multiple citations in one parenthesis are split into separate assessments.
-2. **Build a supply profile.** Real abstracts or source passages are used instead of treating BibTeX entries as abstracts. The profile records evidence type, sample or research object, conclusion direction (support, refute, or neutral mention), and whether the source is primary. A refuting source cannot serve as direct support.
-3. **Score alignment with evidence constraints.** The score has three groups: need alignment (whether the source provides the needed evidence type), support (whether the source conclusion supports the claim), and supply quality (evidence strength, timeliness, and verifiability). Several hard rules apply: refutation is vetoed; claims are split into independently verifiable atoms; every judgment includes both the citing sentence and a cited evidence sentence; and insufficient evidence caps confidence and triggers human review rather than a forced mismatch verdict.
-4. **Use the same yardstick for replacement.** Replacement candidates are retrieved only when an existing citation is judged low-relevance. Candidates are reranked with the same criteria used for evaluation, avoiding the inconsistency of rejecting a citation and then recommending an equally weak replacement. Candidates must come from verifiable academic sources and are written back only after human confirmation.
-5. **Degrade conservatively when evidence is thin.** When API quotas are exhausted, abstracts are unavailable, or Chinese sources cannot be verified, the tool performs a preliminary judgment using titles and available abstracts only: confidence is capped, no direct mismatch verdict is issued, and results are marked as "suspected mismatch, read the full text". NLI and semantic recall are optional algorithm layers; when dependencies are missing, scripts explicitly mark the degraded result rather than presenting it as a model judgment.
+The workflow has six stages. Each solves a concrete problem and has a script or model behind it:
 
-See `references/rubric.md` for field specifications, `references/algorithms.md` for script interfaces and degradation behavior, and [REFERENCES.md](REFERENCES.md) for the method sources.
+| Stage | What you see | What happens underneath |
+|---|---|---|
+| 0. Source correctness | Whether the work exists and needs bibliographic correction | `verify_sources.py` queries Crossref and OpenAlex by DOI or title and compares authors, title, venue, year, DOI, volume, issue, and pages; `apply_source_fixes.py` produces a correction diff |
+| 1. Need profile | What job each citation is doing | Two templates (empirical / modeling) classify functions such as theory, method, data/measurement, and result comparison, plus evidence strength; multiple citations in one parenthesis are split |
+| 2. Supply profile | What the source actually supplies | `fetch_metadata.py` retrieves real abstracts and cross-checks metadata; an NLI model labels the conclusion as support, refute, or neutral mention; refutation cannot be used as support |
+| 3. Alignment scoring | An A / B / C / D verdict | `score_relevance.py` computes a weighted score over three groups; claims are split into atoms and checked separately; both the citing sentence and a cited evidence sentence are recorded |
+| 4. Replacement candidates | Better alternatives with reasons | `search_candidates.py` performs BM25 lexical recall and `semantic_recall.py` reranks with SPECTER embeddings; candidates are scored with **the same criteria** used for the original citation |
+| 5. Decision and write-back | A diff, a backup, and a confirmation gate | `apply_replacement.py` generates a diff by default and writes only after explicit confirmation; `calibrate.py` can calibrate confidence when human labels exist |
+
+### Four design choices that matter to users
+
+1. **Need comes before source.** We read the text first, then ask whether the source supplies it. This separates a legitimate background citation from a topically related source that cannot support the claim.
+2. **One yardstick.** Evaluation and replacement ranking use the same scoring criteria, avoiding the inconsistency of rejecting a citation and then recommending an equally weak replacement.
+3. **No conclusion without evidence.** Abstract-level evidence caps confidence; title-level evidence is escalated to a human; unverifiable Chinese sources are reported as unverifiable, not nonexistent.
+4. **No silent rewriting.** Replacements are delivered as diffs and written only after explicit confirmation; academic responsibility stays with the author.
+
+### Implementation parameters (for review and tuning)
+
+| Component | Key settings |
+|---|---|
+| Source check | Title similarity threshold 0.6; venue similarity 0.35; year difference over 2 years is a field error; no matches produce `fabricated_suspected` or `unverifiable_*`, never an automatic fabrication verdict |
+| Scoring weights | Need alignment 0.40 (function 0.25 + object 0.15); support 0.40 (claim support 0.30 + direction 0.10); supply quality 0.20 (evidence strength 0.10 + timeliness 0.05 + primary/verifiable 0.05) |
+| Grades | A ≥ 0.85; B 0.65–0.85; C 0.40–0.65; D < 0.40; REFUTE direction is a veto |
+| Evidence caps | `full_text` 1.0; `abstract_only` 0.6; `title_only` 0.45; `unverifiable` 0.3. Low confidence always abstains to human review |
+| NLI | `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`, three states SUPPORT / REFUTE / NEUTRAL with probabilities; missing dependencies return UNKNOWN and fall back to agent reasoning |
+| Semantic recall | `sentence-transformers/allenai-specter` (SPECTER) dual-encoder cosine reranking; fallback to BM25 (k1=1.5, b=0.75) with `lexical_fallback` when unavailable |
+| Calibration | numpy-only ECE, Brier Score, Platt Scaling, and Isotonic Regression; no sklearn dependency |
+| Model access | NLI and semantic recall are optional layers; in some regions set `HF_ENDPOINT=https://hf-mirror.com`; degraded results are always labeled explicitly and never presented as model judgments |
+
+See `references/rubric.md` for field specifications, `references/source-verification.md` for source checks, `references/algorithms.md` for script interfaces and degradation behavior, and [REFERENCES.md](REFERENCES.md) for the method sources.
 
 ## Installation
 
@@ -77,6 +103,8 @@ All intermediate files are written to `.reference-relevant/` under the working d
 
 ```bash
 python scripts/parse_document.py <input> -o .reference-relevant/parsed.json --discipline econ-empirical
+python scripts/verify_sources.py .reference-relevant/parsed.json -o .reference-relevant/source_check.json
+python scripts/apply_source_fixes.py .reference-relevant/source_check.json --input <input> -o .reference-relevant/source_fixes.diff
 python scripts/fetch_metadata.py .reference-relevant/parsed.json -o .reference-relevant/supply.json
 python scripts/score_relevance.py .reference-relevant/assessment.json -o .reference-relevant/scored.json
 python scripts/search_candidates.py --assessment .reference-relevant/assessment.json -o .reference-relevant/candidates.json --top-k 5
@@ -91,7 +119,8 @@ Chinese sources: CNKI has no public API; captchas and anti-bot controls are not 
 
 ## Scope and limitations
 
-- Focuses on existing citations; uncited text is skipped except for high-risk concepts and central claims, where a "consider adding a citation" note may be produced.
+- Focuses on existing citations and verifies source correctness before relevance assessment; uncited text is skipped except for high-risk concepts and central claims.
+- Source verification is not a comprehensive formatting audit and does not replace author confirmation; unverifiable sources are reported as such, not as nonexistent.
 - Does not replace dedicated reference verification or formatting tools, and does not make the final decision for the author.
 - Replacements generate diffs by default; files are backed up and changed only after explicit confirmation.
 - `abstract_only` evidence caps confidence at 0.6 and never yields a mismatch verdict directly; `title_only` caps it at 0.45 and forces abstention.
@@ -114,9 +143,12 @@ reference-relevance/
 │   ├── api-notes.md              # English data sources, limits, caching, verification, fields
 │   ├── citation_functions.md     # Citation function taxonomy for empirical/modeling papers
 │   ├── cn-sources.md             # Chinese source boundaries, record matching, fallback wording
-│   └── rubric.md                 # Scoring rubric: dimensions, grades, evidence levels, confidence
+│   ├── rubric.md                 # Scoring rubric: dimensions, grades, evidence levels, confidence
+│   └── source-verification.md    # Source check fields, statuses, and handling order
 └── scripts/
     ├── parse_document.py         # Parse docx/pdf/LaTeX into claims, citation positions, contexts
+    ├── verify_sources.py         # Pre-flight existence and metadata verification
+    ├── apply_source_fixes.py     # Generate reviewed metadata correction diffs and apply on confirmation
     ├── fetch_metadata.py         # Fetch abstracts, cross-check metadata, cache, build supply fields
     ├── search_candidates.py      # BM25 lexical recall of replacement candidates
     ├── semantic_recall.py        # SPECTER2 semantic reranking; BM25 fallback when unavailable
