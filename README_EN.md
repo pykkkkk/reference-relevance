@@ -9,6 +9,7 @@ The current discipline profile covers empirical and modeling papers in economics
 ## Features
 
 - Pre-flight source verification: check existence and compare authors, title, venue, year, DOI, volume, issue, and pages against trusted databases; correct errors before evaluating relevance.
+- LLM-based citation parsing: scripts extract raw text blocks and bibliography; the model identifies citation markers, splits multi-citation groups, and classifies functions directly. Regex parsing is a fallback only.
 - Parse documents into claim units, citation positions, citation contexts, and reference entries.
 - Use a need–supply framework to classify citation functions and assess each cited work individually, including every item inside a multi-citation parenthesis.
 - Retrieve real abstracts from multiple sources and cross-check metadata; Chinese sources are routed separately, and unverifiable items are reported as "unverifiable" rather than "nonexistent".

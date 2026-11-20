@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic scoring from rubric v0.2: weights, veto, evidence caps, grade."""
+"""Deterministic scoring from rubric v0.2: weights, veto, evidence caps, grade (v0.1.0 algorithm layer)."""
 import argparse
 import sys
 from pathlib import Path
@@ -31,10 +31,12 @@ def score_one(item):
     suspected = False
     abstain = bool(item.get("abstain", False))
 
+    original_action = item.get("action", {}).get("type", "rewrite_text")
     if veto:
         grade, action = "D", "replace_citation"
     elif evidence == "title_only":
-        grade, action = "C", "rewrite_text"  # 仅题录：不判支撑性，强制人工
+        grade = "C"  # 仅题录：不判支撑性，强制人工
+        action = original_action  # 降级只限制结论强度，不篡改已给出的动作类型
         abstain = True
         suspected = total < 0.40
     elif evidence in ("abstract_only", "unverifiable"):

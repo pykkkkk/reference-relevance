@@ -30,13 +30,23 @@ description: 评估学术论文中已有引用是否与正文的引用需求匹�
 
 ### Step 0 — 解析文档
 
+**引用标记的识别与功能分类由大模型（agent）直接完成**，不依赖正则规则；脚本只负责把文档转成带位置的文本块和参考文献条目。
+
 ```bash
-python scripts/parse_document.py <input> -o .reference-relevant/parsed.json [--discipline econ-empirical|econ-modeling]
+python scripts/parse_document.py <input> -o .reference-relevant/raw.json [--discipline econ-empirical|econ-modeling]
 ```
 
-接受 `.docx`、`.pdf`、`.tex` 或含 `.tex` + `.bib` 的目录。输出 JSON：文献条目、引用位置、引用上下文、正文段落、章节信息。支持编号制 `[1]`、`[1,2]` 与作者—年份制 `(Smith, 2020)`、`Smith (2020)`。
+`raw.json` 只提供 `references`、`blocks`、`parse_warnings` 等原始材料。随后 agent 阅读 `raw.json` 中的正文，按 `references/llm-parsing.md` 的规则直接写出 `.reference-relevant/parsed.json`：
 
-检查输出中的 `parse_warnings`：出现「引用标记无法解析」「参考文献切分失败」时，先人工核对原稿，不继续评分。
+- 识别每一处引用标记：作者—年份制（含 `et al.`、`&`、`and`、`e.g.`、`a la`、多次出现的同一文献）与编号制 `[1,2]`；
+- 同一括号内多篇引用逐条拆分，每一条生成独立 `claim`，`ref_indices` 只填对应的那一篇；
+- 同一定文献在全文出现多次时，按出现位置分别生成 `claim`，各自绑定所在句子；
+- 在 `claim` 中直接写入 `function`（引用功能）与 `strength`（直接证据 / 间接背景），即 Step 1 的需求画像与解析合并完成；
+- 输出字段必须包含 `claim_id`、`block_index`、`marker`、`author_hint`、`year_hint`、`text`、`context_before`、`context_after`、`ref_indices`、`function`、`strength`、`necessity`、`confidence`、`needs_review`。
+
+**规则脚本的角色**：无大模型可用时，`parse_document.py` 可加 `--rule-claims` 直接产出 `parsed.json` 作为兜底；该路径受正则覆盖限制，报告中必须标注 `parsing_method: rule_based`，提示可能漏掉复杂引用格式。默认使用大模型解析路径，标 `parsing_method: llm`。
+
+检查材料中的 `parse_warnings`：出现「参考文献切分失败」时先人工核对原稿，不继续评分。
 
 ### Step 0A — 来源正确性前置检查（硬性闸门）
 
@@ -56,9 +66,9 @@ python scripts/verify_sources.py .reference-relevant/parsed.json -o .reference-r
 - `unverifiable_zh` / `unverifiable_degraded`：无法核验，不等于不存在；向用户说明限制并取得确认后才能继续。
 - 只要仍有 `blocking=true`，不得进入 Step 1 及后续评分。
 
-### Step 1 — 需求画像（agent 推理）
+### Step 1 — 需求画像（已并入 Step 0）
 
-读取 `.reference-relevant/parsed.json`。对每个含引用的论断单元，按 `references/citation_functions.md` 的功能轴与强度轴判定需求，写入 `.reference-relevant/needs.json`。
+大模型解析时已在每个 `claim` 中写入 `function` / `strength` / `necessity`，无需重复判断。若使用规则兜底路径，则读取 `.reference-relevant/parsed.json`，对每个含引用的论断单元按 `references/citation_functions.md` 补齐这些字段，写入 `.reference-relevant/needs.json`。
 
 要求：
 - 以**可独立验证的论断**为单位，不以整句为单位；一句含多个论断时拆开。
@@ -149,6 +159,7 @@ agent 不重复执行脚本可完成的取数工作；脚本不做语义判断�
 - `source-verification.md` — 来源正确性前置检查的字段、状态与处理顺序
 - `algorithms.md` — 四个算法脚本（评分、NLI、语义召回、校准）的接口、依赖与降级状态
 - `citation_functions.md` — 经管引用功能轴；实证与建模两个需求模板
+- `llm-parsing.md` — 大模型引用解析的输入、输出字段与必须遵守的拆分规则
 - `api-notes.md` — 英文数据源、限额、缓存、验真策略
 - `cn-sources.md` — 中文来源能力边界与降级话术
 

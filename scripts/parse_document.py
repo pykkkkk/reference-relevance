@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse a paper into claim units, citation markers and reference entries ."""
+"""Parse a paper into claim units, citation markers and reference entries (v0.1.0 skeleton)."""
 import argparse
 import itertools
 import re
@@ -12,10 +12,10 @@ from rr_common import last_name, split_sentences, strip_latex, write_json  # noq
 
 NUMBERED = re.compile(r"\[([\d\-–,\s]+)\]")
 _CLAIM_SEQ = itertools.count(1)
-PAREN = re.compile(r"\(\s*([A-Z][A-Za-z\.\-]*(?:\s+(?:et\s+al\.?|\\?&|and)\s*[A-Za-z\.\-]+)?)\s*,?\s*((?:19|20)\d{2}[a-z]?)\s*\)")
+PAREN = re.compile(r"\(\s*(?:e\.g\.\s*|eg\s*|i\.e\.\s*)?([A-Z][A-Za-z\.\-]*(?:\s+(?:et\s+al\.?|\\?&|and)\s*[A-Za-z\.\-]+)?)\s*,?\s*((?:19|20)\d{2}[a-z]?)\s*\)")
 NARRATIVE = re.compile(r"([A-Z][A-Za-z\.\-]*(?:\s+(?:et\s+al\.?|\\?&|and)\s*[A-Za-z\.\-]+)?)\s+\(((?:19|20)\d{2}[a-z]?)\)")
 GROUP = re.compile(r"\(([^()]*\b(?:19|20)\d{2}[^()]*)\)")
-ITEM = re.compile(r"\s*([A-Z][^,;]*?)\s*,?\s*((?:19|20)\d{2}[a-z]?)\s*$")
+MULTI_ITEM = re.compile(r"([A-Z][A-Za-z\.\-]*(?:\s+(?:et\s+al\.?|\\?&|and)(?:\s+[A-Za-z\.\-]+)?)*)\s*,?\s*((?:19|20)\d{2}[a-z]?)")
 YEAR = re.compile(r"(?:19|20)\d{2}")
 
 
@@ -139,21 +139,19 @@ def extract_claims(blocks, refs):
     for b in blocks:
         text = b["text"]
         sents = split_sentences(text)
-        group_spans = [m.span() for m in GROUP.finditer(text) if ";" in m.group(1)]
+        group_spans = [m.span() for m in GROUP.finditer(text)
+                       if len(YEAR.findall(m.group(1))) >= 2 or ";" in m.group(1)]
         for gspan in group_spans:
             inner = text[gspan[0] + 1:gspan[1] - 1]
-            for item in inner.split(";"):
-                mm = ITEM.match(item)
-                if not mm:
-                    continue
+            for mm in MULTI_ITEM.finditer(inner):
                 author, year = mm.group(1).strip(), mm.group(2)[:4]
                 idx = by_author_year.get((last_name(author), year))
                 if idx is None:
                     idx = next((i for (a, y), i in by_author_year.items() if y == year and (a in last_name(author) or last_name(author) in a)), None)
-                claims.append(_claim(b, sents, item.strip(), [idx] if idx else [], "author_year_group", author, year))
+                claims.append(_claim(b, sents, mm.group(0).strip(), [idx] if idx else [], "author_year_group", author, year, mm.start()))
         for m in NUMBERED.finditer(text):
             nums = [int(x) for x in re.split(r"[,，\s]+", m.group(1)) if x.isdigit()]
-            claims.append(_claim(b, sents, m.group(0), nums, "numbered"))
+            claims.append(_claim(b, sents, m.group(0), nums, "numbered", match_pos=m.start()))
         for m in list(PAREN.finditer(text)) + list(NARRATIVE.finditer(text)):
             if any(gs <= m.start() and m.end() <= ge for gs, ge in group_spans):
                 continue
@@ -161,12 +159,24 @@ def extract_claims(blocks, refs):
             idx = by_author_year.get((last_name(author), year))
             if idx is None:
                 idx = next((i for (a, y), i in by_author_year.items() if y == year and (a in last_name(author) or last_name(author) in a)), None)
-            claims.append(_claim(b, sents, m.group(0), [idx] if idx else [], "author_year", author, year))
+            claims.append(_claim(b, sents, m.group(0), [idx] if idx else [], "author_year", author, year, m.start()))
     return claims
 
 
-def _claim(block, sents, marker, indices, style, author="", year=""):
-    hit = next((s for s in sents if marker in s), block["text"])
+def _claim(block, sents, marker, indices, style, author="", year="", match_pos=None):
+    hit = None
+    if match_pos is not None:
+        # 找覆盖该位置的句子，避免同一 marker 多次出现时都定位到第一处
+        cursor = 0
+        for s in sents:
+            start = block["text"].find(s, cursor)
+            if start >= 0 and start <= match_pos < start + len(s):
+                hit = s
+                break
+            if start >= 0:
+                cursor = start + len(s)
+    if hit is None:
+        hit = next((s for s in sents if marker in s), block["text"])
     pos = sents.index(hit) if hit in sents else 0
     return {
         "claim_id": f"c{next(_CLAIM_SEQ):03d}",
@@ -189,6 +199,8 @@ def main():
     ap.add_argument("input", help=".docx / .pdf / .tex file or LaTeX project directory")
     ap.add_argument("-o", "--output", default=".reference-relevant/parsed.json")
     ap.add_argument("--discipline", choices=["econ-empirical", "econ-modeling"], default="econ-empirical")
+    ap.add_argument("--rule-claims", action="store_true",
+                    help="fallback: also extract claims by regex (default: only raw materials for LLM parsing)")
     args = ap.parse_args()
 
     path = Path(args.input)
@@ -205,12 +217,15 @@ def main():
         raise SystemExit(f"不支持的输入类型: {suffix}（支持 .docx / .pdf / .tex / LaTeX 目录）")
 
     refs = parsed.get("bib_refs") or _reference_section(parsed["blocks"])
-    claims = extract_claims(parsed["blocks"], refs)
+    claims = extract_claims(parsed["blocks"], refs) if args.rule_claims else []
+    method = "rule_based" if args.rule_claims else "llm"
     warnings = []
     if not refs:
         warnings.append("未解析到参考文献条目，请检查参考文献章节或 .bib 文件")
-    if not claims:
+    if args.rule_claims and not claims:
         warnings.append("未解析到引用标记，中文全角括号或特殊宏可能需要人工核对")
+    if not args.rule_claims:
+        warnings.append("引用标记与功能分类需由大模型写入 claims；规则路径可用 --rule-claims 兜底")
     if suffix == ".pdf":
         warnings.append("PDF 解析为兜底路径，页码/行号与题录切分需人工抽检")
 
@@ -218,6 +233,7 @@ def main():
         "source_type": parsed["source_type"],
         "discipline": args.discipline,
         "title": parsed["title"],
+        "parsing_method": method,
         "reference_count": len(refs),
         "claim_count": len(claims),
         "references": refs,
